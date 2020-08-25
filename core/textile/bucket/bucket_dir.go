@@ -46,7 +46,7 @@ func (b *Bucket) CreateDirectory(ctx context.Context, path string) (result path.
 		return nil, nil, err
 	}
 	// append .keep file to the end of the directory
-	emptyDirPath := strings.TrimRight(path, "/") + "/" + keepFileName
+	emptyDirPath := strings.TrimRight(cleanBucketPath(path), "/") + "/" + keepFileName
 	return b.bucketsClient.PushPath(ctx, b.Key(), emptyDirPath, &bytes.Buffer{})
 }
 
@@ -59,7 +59,7 @@ func (b *Bucket) ListDirectory(ctx context.Context, path string) (*DirEntries, e
 		return nil, err
 	}
 
-	result, err := b.bucketsClient.ListPath(ctx, b.Key(), path)
+	result, err := b.bucketsClient.ListPath(ctx, b.Key(), cleanBucketPath(path))
 	return (*DirEntries)(result), err
 }
 
@@ -73,5 +73,5 @@ func (b *Bucket) DeleteDirOrFile(ctx context.Context, path string) (path.Resolve
 		return nil, err
 	}
 
-	return b.bucketsClient.RemovePath(ctx, b.Key(), path)
+	return b.bucketsClient.RemovePath(ctx, b.Key(), cleanBucketPath(path))
 }
