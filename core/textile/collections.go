@@ -3,6 +3,7 @@ package textile
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/FleekHQ/space-daemon/core/keychain"
 	"github.com/FleekHQ/space-daemon/core/textile/utils"
@@ -18,13 +19,25 @@ type BucketSchema struct {
 	ID     core.InstanceID `json:"_id"`
 	Slug   string          `json:"slug"`
 	Backup bool            `json:"backup"`
-	DbID   string
+
+	DbID string
+}
+
+// BucketPathEncryptionSchema is schema for Bucket Encryption Collection
+// It is a special collection for tracking files and directories encryption keys.
+type BucketPathEncryptionSchema struct {
+	// ID is the path encrypted by EncryptionKey
+	ID            core.InstanceID `json:"_id"`
+	EncryptionKey string          `json:"key"`
+	BucketSlug    string          `json:"bucket_slug"`
 }
 
 const metaThreadName = "metathreadV1"
+const pathEncryptionCollectionName = "BucketPathEncryptionMetadata"
 const bucketCollectionName = "BucketMetadata"
 
 var errBucketNotFound = errors.New("Bucket not found")
+var ErrBucketPathEncryptionNotFound = errors.New("path encryption for bucket not found")
 
 func (tc *textileClient) storeBucketInCollection(ctx context.Context, bucketSlug, dbID string) (*BucketSchema, error) {
 	log.Debug("storeBucketInCollection: Storing bucket " + bucketSlug)
@@ -36,6 +49,11 @@ func (tc *textileClient) storeBucketInCollection(ctx context.Context, bucketSlug
 	log.Debug("storeBucketInCollection: Initializing db")
 	metaCtx, metaDbID, err := tc.initBucketCollection(ctx)
 	if err != nil && metaDbID == nil {
+		return nil, err
+	}
+
+	err = tc.initBucketPathEncryptionCollection(ctx, *metaDbID)
+	if err != nil {
 		return nil, err
 	}
 
@@ -229,4 +247,85 @@ func (tc *textileClient) initBucketCollection(ctx context.Context) (context.Cont
 	}
 
 	return metaCtx, dbID, nil
+}
+
+// initializes bucket path encryption collection inside the thread provided.
+func (tc *textileClient) initBucketPathEncryptionCollection(ctx context.Context, dbId thread.ID) error {
+	if err := tc.threads.NewCollection(ctx, dbId, db.CollectionConfig{
+		Name:   pathEncryptionCollectionName,
+		Schema: util.SchemaFromInstance(&BucketPathEncryptionSchema{}, false),
+		Indexes: []db.Index{
+			{
+				Path:   "bucket_slug",
+				Unique: false,
+			},
+		},
+	}); err != nil {
+		log.Debug("Failed to create bucket encryption collection", "err:"+err.Error(), "dbId:"+string(dbId))
+		return err
+	}
+
+	return nil
+}
+
+func (tc *textileClient) findBucketPathEncryption(
+	ctx context.Context,
+	bucketSlug, path string,
+) (*BucketPathEncryptionSchema, error) {
+	metaCtx, metaDbID, err := tc.initBucketCollection(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	res, err := tc.threads.Find(
+		metaCtx,
+		*metaDbID,
+		pathEncryptionCollectionName,
+		db.Where("bucket_slug").Eq(bucketSlug).And("_id").Eq(path),
+		&BucketPathEncryptionSchema{},
+	)
+
+	if err != nil {
+		log.Debug("Failed to find bucket path encryption", "error:"+err.Error(), "bucket:"+bucketSlug, "path:"+path)
+		return nil, err
+	}
+
+	pathEncryptions, ok := res.([]*BucketPathEncryptionSchema)
+	if !ok || len(pathEncryptions) == 0 {
+		return nil, ErrBucketPathEncryptionNotFound
+	}
+
+	return pathEncryptions[0], nil
+}
+
+func (tc *textileClient) upsertBucketPathEncryption(
+	ctx context.Context,
+	bucketSlug, path, key string,
+) (*BucketPathEncryptionSchema, error) {
+	metaCtx, metaDbID, err := tc.initBucketCollection(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	existingPathEncryption, err := tc.findBucketPathEncryption(ctx, bucketSlug, path)
+	if err == nil {
+		return existingPathEncryption, nil
+	}
+
+	newInstance := BucketPathEncryptionSchema{
+		ID:            core.InstanceID(path),
+		EncryptionKey: key,
+		BucketSlug:    bucketSlug,
+	}
+
+	instances := client.Instances{&newInstance}
+
+	_, err = tc.threads.Create(metaCtx, *metaDbID, pathEncryptionCollectionName, instances)
+	if err != nil {
+		return nil, err
+	}
+
+	log.Debug("successfully stored bucket encryption", fmt.Sprintf("schema:%+v", newInstance))
+
+	return &newInstance, nil
 }
